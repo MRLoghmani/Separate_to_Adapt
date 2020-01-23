@@ -116,7 +116,8 @@ class FileListDataset(BaseImageDataset):
             try:
                 self.labels = [int(x[1]) for x in data]
             except ValueError as e:
+                self.labels = [float(x[1]) for x in data]
                 print('invalid label number, maybe there is space in image path?')
-                raise e
+                #raise e
 
 

@@ -1,55 +1,66 @@
 from data import *
 from utilities import *
-from networks import *
+from networks_cifar import *
 import matplotlib.pyplot as plt
 import numpy as np
+import sys
+
+from torchvision.datasets import MNIST
+from mnistm import *
+from torchvision import transforms
 
 def skip(data, label, is_train):
     return False
-batch_size = 32
+batch_size = int(sys.argv[1]) #32
+learning_rate = float(sys.argv[2]) #1e-3
+rank_interval = int(batch_size / 16)
 
-def transform(data, label, is_train):
-    label = one_hot(11, label)
-    data = tl.prepro.crop(data, 224, 224, is_random=is_train)
-    data = np.transpose(data, [2, 0, 1])
-    data = np.asarray(data, np.float32) / 255.0
-    return data, label
-ds = FileListDataset('/mnt/datasets/office-31/amazon/images/known_split.txt', '/mnt/datasets/office-31/amazon/images/', transform=transform, skip_pred=skip, is_train=True, imsize=256)
-source_train = CustomDataLoader(ds, batch_size=batch_size, num_threads=2)
+def get_dataset():
+    train_dataset = MNISTM('../data', train=True, download=True,
+            transform=transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            ]))
+    
+    test_dataset = MNIST('../data', train=True, download=True,
+            transform=transforms.Compose([
+                transforms.Lambda(lambda x: x.convert("RGB")),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            ]))
 
-def transform(data, label, is_train):
-    if label in range(10):
-        label = one_hot(11, label)
-    else:
-        label = one_hot(11,10)
-    data = tl.prepro.crop(data, 224, 224, is_random=is_train)
-    data = np.transpose(data, [2, 0, 1])
-    data = np.asarray(data, np.float32) / 255.0
-    return data, label
-ds1 = FileListDataset('/mnt/datasets/office-31/dslr/images/os_split.txt', '/mnt/datasets/office-31/dslr/images/', transform=transform, skip_pred=skip, is_train=True, imsize=256)
-target_train = CustomDataLoader(ds1, batch_size=batch_size, num_threads=2)
+    image_path = []
+    image_label = []
+    for i in range(len(train_dataset.train_data)):
+        if int(train_dataset.train_labels[i]) < 5:
+            image_path.append(train_dataset.train_data[i])
+            image_label.append(train_dataset.train_labels[i])
+    train_dataset.train_data = image_path
+    train_dataset.train_labels = image_label
+    
+    return train_dataset, test_dataset
 
-def transform(data, label, is_train):
-    label = one_hot(31, label)
-    data = tl.prepro.crop(data, 224, 224, is_random=is_train)
-    data = np.transpose(data, [2, 0, 1])
-    data = np.asarray(data, np.float32) / 255.0
-    return data, label
-ds2 = FileListDataset('/mnt/datasets/office-31/dslr/images/os_split.txt', '/mnt/datasets/office-31/dslr/images/', transform=transform, skip_pred=skip, is_train=False, imsize=256)
-target_test = CustomDataLoader(ds2, batch_size=batch_size, num_threads=2)
+source_dataset, target_dataset = get_dataset()
+
+source_loader = torch.utils.data.DataLoader(source_dataset, 
+    batch_size=batch_size, shuffle=True, num_workers=0)
+
+target_loader = torch.utils.data.DataLoader(target_dataset,
+    batch_size=batch_size, shuffle=True, num_workers=0)
 
 setGPU('0')
 log = Logger('log/Step_2', clear=True)
 
 
 #discriminator_t = CLS_0(2048,2,bottle_neck_dim = 256).cuda()
-discriminator_t = CLS_0(4096,2,bottle_neck_dim = 256).cuda()
+discriminator_t = CLS_0(500,2,bottle_neck_dim = 100).cuda()
 #----------------------------load the known/unknown discriminator
-discriminator_t.load_state_dict(torch.load('discriminator_a_alexnet.pkl'))
-discriminator = LargeAdversarialNetwork(256).cuda()
+discriminator_t.load_state_dict(torch.load('discriminator_a_mnist.pkl'))
+discriminator = SmallAdversarialNetwork(100).cuda()
 #feature_extractor = ResNetFc(model_name='resnet50',model_path='/home/youkaichao/data/pytorchModels/resnet50.pth')
-feature_extractor = AlexNetFc()
-cls = CLS(feature_extractor.output_num(), 11, bottle_neck_dim=256)
+feature_extractor = MNISTFc()
+feature_extractor.load_state_dict(torch.load('feature_extractor_a_mnist.pkl'))
+cls = CLS(feature_extractor.output_num(), 6, bottle_neck_dim=100)
 net = nn.Sequential(feature_extractor, cls).cuda()
 
 scheduler = lambda step, initial_lr : inverseDecaySheduler(step, initial_lr, gamma=10, power=0.75, max_iter=10000)
@@ -61,15 +72,26 @@ optimizer_feature_extractor = OptimWithSheduler(optim.SGD(feature_extractor.para
 optimizer_cls = OptimWithSheduler(optim.SGD(cls.parameters(), lr=5e-4, weight_decay=5e-4, momentum=0.9, nesterov=True),
                             scheduler)
 
-# =========================weighted adaptation of the source and target domains                            
+# =========================weighted adaptation of the source and target domains
+print("=========================weighted adaptation of the source and target domains")                            
 k=0
 while k <1500:
-    for (i, ((im_source, label_source), (im_target, label_target))) in enumerate(
-            zip(source_train.generator(), target_train.generator())):
-        
-        im_source = Variable(torch.from_numpy(im_source)).cuda()
-        label_source = Variable(torch.from_numpy(label_source)).cuda()
-        im_target = Variable(torch.from_numpy(im_target)).cuda()
+    for i, (batch_source, batch_target) in enumerate(zip(source_loader, target_loader)):
+
+        im_source, label_source = batch_source
+        im_target, label_target = batch_target
+
+        def one_hot_encoding(y):
+            y_onehot = y.numpy()
+            y_onehot = (np.arange(6) == y_onehot[:,None]).astype(np.float32)
+            y_onehot = torch.from_numpy(y_onehot)
+            return y_onehot
+
+        label_source = one_hot_encoding(label_source)
+        label_target = one_hot_encoding(label_target)
+
+        im_source, label_source = im_source.cuda(), label_source.cuda(non_blocking=True)
+        im_target, label_target = im_target.cuda(), label_target.cuda(non_blocking=True)
          
         _, feature_source, __, predict_prob_source = net.forward(im_source)
         ft1, feature_target, __, predict_prob_target = net.forward(im_target)
@@ -77,12 +99,15 @@ while k <1500:
         domain_prob_discriminator_1_source = discriminator.forward(feature_source)
         domain_prob_discriminator_1_target = discriminator.forward(feature_target)
         
-        __,_,_,dptarget = discriminator_t.forward(ft1.detach())
-        r = torch.sort(dptarget[:,1].detach(),dim = 0)[1][30:]
-        feature_otherep = torch.index_select(ft1, 0, r.view(2))
-        _, _, __, predict_prob_otherep = cls.forward(feature_otherep)
-        ce_ep = CrossEntropyLoss(Variable(torch.from_numpy(np.concatenate((np.zeros((2,10)), np.ones((2,1))), axis = -1).astype('float32'))).cuda(),predict_prob_otherep)
-        
+        try:
+            __,_,_,dptarget = discriminator_t.forward(ft1.detach())
+            r = torch.sort(dptarget[:,1].detach(),dim = 0)[1][batch_size-rank_interval:]
+            feature_otherep = torch.index_select(ft1, 0, r.view(rank_interval))
+            _, _, __, predict_prob_otherep = cls.forward(feature_otherep)
+            ce_ep = CrossEntropyLoss(Variable(torch.from_numpy(np.concatenate((np.zeros((rank_interval,5)), np.ones((rank_interval,1))), axis = -1).astype('float32'))).cuda(),predict_prob_otherep)
+        except:
+            continue
+
         ce = CrossEntropyLoss(label_source, predict_prob_source)
 
         entropy = EntropyLoss(predict_prob_target, instance_level_weight= dptarget[:,0].contiguous())
@@ -108,14 +133,24 @@ while k <1500:
             
 
 # =========================eliminate unknown samples 
+print("=========================eliminate unknown samples")
 k=0
 while k <400:
-    for (i, ((im_source, label_source), (im_target, label_target))) in enumerate(
-            zip(source_train.generator(), target_train.generator())):
-        
-        im_source = Variable(torch.from_numpy(im_source)).cuda()
-        label_source = Variable(torch.from_numpy(label_source)).cuda()
-        im_target = Variable(torch.from_numpy(im_target)).cuda()
+    for i, (batch_source, batch_target) in enumerate(zip(source_loader, target_loader)):
+        im_source, label_source = batch_source
+        im_target, label_target = batch_target
+
+        def one_hot_encoding(y):
+            y_onehot = y.numpy()
+            y_onehot = (np.arange(6) == y_onehot[:,None]).astype(np.float32)
+            y_onehot = torch.from_numpy(y_onehot)
+            return y_onehot
+
+        label_source = one_hot_encoding(label_source)
+        label_target = one_hot_encoding(label_target)
+
+        im_source, label_source = im_source.cuda(), label_source.cuda(non_blocking=True)
+        im_target, label_target = im_target.cuda(), label_target.cuda(non_blocking=True)
          
         _, feature_source, __, predict_prob_source = net.forward(im_source)
         ft1, feature_target, __, predict_prob_target = net.forward(im_target)
@@ -124,11 +159,15 @@ while k <400:
         domain_prob_discriminator_1_target = discriminator.forward(feature_target)
         
         __,_,_,dptarget = discriminator_t.forward(ft1.detach())
-        r = torch.sort(dptarget[:,1].detach(),dim = 0)[1][30:]
-        feature_otherep = torch.index_select(ft1, 0, r.view(2))
+        r = torch.sort(dptarget[:,1].detach(),dim = 0)[1][batch_size-rank_interval:]
+
+        try:
+            feature_otherep = torch.index_select(ft1, 0, r.view(rank_interval))
+        except:
+            continue
         _, _, __, predict_prob_otherep = cls.forward(feature_otherep)
-        ce_ep = CrossEntropyLoss(Variable(torch.from_numpy(np.concatenate((np.zeros((2,10)), np.ones((2,1))), axis = -1).astype('float32'))).cuda(),predict_prob_otherep)
-        
+        ce_ep = CrossEntropyLoss(Variable(torch.from_numpy(np.concatenate((np.zeros((rank_interval,5)), np.ones((rank_interval,1))), axis = -1).astype('float32'))).cuda(),predict_prob_otherep)
+
         ce = CrossEntropyLoss(label_source, predict_prob_source)
 
         entropy = EntropyLoss(predict_prob_target, instance_level_weight= dptarget[:,0].contiguous())
@@ -155,17 +194,28 @@ while k <400:
 torch.cuda.empty_cache()
 
 # =================================evaluation
-with TrainingModeManager([feature_extractor,discriminator_t, cls], train=False) as mgr, Accumulator(['predict_prob','dp','predict_index', 'label']) as accumulator:
-    for (i, (im, label)) in enumerate(target_test.generator()):
+print("# =================================evaluation")
 
-        im = Variable(torch.from_numpy(im), volatile=True).cuda()
-        label = Variable(torch.from_numpy(label), volatile=True).cuda()
+with TrainingModeManager([feature_extractor,discriminator_t, cls], train=False) as mgr, Accumulator(['predict_prob','dp','predict_index', 'label']) as accumulator:
+    for i, batch_target in enumerate(target_loader):
+        im, label = batch_target
+
+        def one_hot_encoding(y):
+            y_onehot = y.numpy()
+            y_onehot = (np.arange(6) == y_onehot[:,None]).astype(np.float32)
+            y_onehot = torch.from_numpy(y_onehot)
+            return y_onehot
+
+        label = one_hot_encoding(label)
+        im, label = im.cuda(), label.cuda(non_blocking=True)
+
         ss, fs,_,  predict_prob = net.forward(im)
         _,_,_,dp = discriminator_t.forward(ss)
         predict_prob, dp,label = [variable_to_numpy(x) for x in (predict_prob,dp[:,1], label)]
         label = np.argmax(label, axis=-1).reshape(-1, 1)
         predict_index = np.argmax(predict_prob, axis=-1).reshape(-1, 1)
         accumulator.updateData(globals())
+
         if i % 10 == 0:
             print(i)
         
@@ -179,6 +229,9 @@ m = extended_confusion_matrix(y_true, y_pred, true_labels=None, pred_labels=list
 
 cm = m
 cm = cm.astype(np.float) / np.sum(cm, axis=1, keepdims=True)
-acc_os_star = sum([cm[i][i] for i in range(10)]) / 10
-acc_os = (acc_os_star * 10 + cm[10][10]) / 11
-print(acc_os, acc_os_star)
+acc_os_star = sum([cm[i][i] for i in range(5)]) / 5
+acc_unk = cm[5][5]
+acc_os = (acc_os_star * 5 + acc_unk) / 6
+acc_all = sum([cm[i][i] for i in range(6)]) / 6
+
+print("OS = {}, OS* = {}, UNK = {}, ALL = {}".format(acc_os, acc_os_star, acc_unk, acc_all))

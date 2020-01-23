@@ -3,53 +3,64 @@ from utilities import *
 from networks import *
 import matplotlib.pyplot as plt
 import numpy as np
+import sys
+
+source_ds = sys.argv[1]
+target_ds = sys.argv[2]
+num_known_classes = int(sys.argv[3])
+id_string = sys.argv[4] #'10-14'
+num_exper = sys.argv[5]
+gpu_id = sys.argv[6]
+
+#num_known_classes = 10
+num_all_classes = 31
 
 def skip(data, label, is_train):
     return False
 batch_size = 32
 
 def transform(data, label, is_train):
-    label = one_hot(11, label)
+    label = one_hot(num_known_classes+1, label)
     data = tl.prepro.crop(data, 224, 224, is_random=is_train)
     data = np.transpose(data, [2, 0, 1])
     data = np.asarray(data, np.float32) / 255.0
     return data, label
-ds = FileListDataset('/mnt/datasets/office-31/amazon/images/known_split.txt', '/mnt/datasets/office-31/amazon/images/', transform=transform, skip_pred=skip, is_train=True, imsize=256)
+ds = FileListDataset('/mnt/datasets/office-31/'+source_ds+'/images/known_split.txt', '/mnt/datasets/office-31/'+source_ds+'/images/', transform=transform, skip_pred=skip, is_train=True, imsize=256)
 
 print(ds)
 
 source_train = CustomDataLoader(ds, batch_size=batch_size, num_threads=2)
 
 def transform(data, label, is_train):
-    if label in range(10):
-        label = one_hot(11, label)
+    if label in range(num_known_classes):
+        label = one_hot(num_known_classes+1, label)
     else:
-        label = one_hot(11,10)
+        label = one_hot(num_known_classes+1,num_known_classes)
     data = tl.prepro.crop(data, 224, 224, is_random=is_train)
     data = np.transpose(data, [2, 0, 1])
     data = np.asarray(data, np.float32) / 255.0
     return data, label
-ds1 = FileListDataset('/mnt/datasets/office-31/dslr/images/os_split.txt', '/mnt/datasets/office-31/dslr/images/', transform=transform, skip_pred=skip, is_train=True, imsize=256)
+ds1 = FileListDataset('/mnt/datasets/office-31/'+target_ds+'/images/os_split.txt', '/mnt/datasets/office-31/'+target_ds+'/images/', transform=transform, skip_pred=skip, is_train=True, imsize=256)
 target_train = CustomDataLoader(ds1, batch_size=batch_size, num_threads=2)
 
 def transform(data, label, is_train):
-    label = one_hot(31,label)
+    label = one_hot(num_all_classes,label)
     data = tl.prepro.crop(data, 224, 224, is_random=is_train)
     data = np.transpose(data, [2, 0, 1])
     data = np.asarray(data, np.float32) / 255.0
     return data, label
-ds2 = FileListDataset('/mnt/datasets/office-31/dslr/images/os_split.txt', '/mnt/datasets/office-31/dslr/images/', transform=transform, skip_pred=skip, is_train=False, imsize=256)
+ds2 = FileListDataset('/mnt/datasets/office-31/'+target_ds+'/images/os_split.txt', '/mnt/datasets/office-31/'+target_ds+'/images/', transform=transform, skip_pred=skip, is_train=False, imsize=256)
 target_test = CustomDataLoader(ds2, batch_size=batch_size, num_threads=2)
 
-setGPU('1')
+setGPU(gpu_id)
 log = Logger('log/step_1', clear=True)
 
 discriminator_t = CLS_0(2048,2,bottle_neck_dim = 256).cuda()
 #discriminator_t = CLS_0(4096, 2, bottle_neck_dim=256).cuda()
-discriminator_p = Discriminator(n = 10).cuda()
-feature_extractor = ResNetFc(model_name='resnet50',model_path='/home/liuhong/data/pytorchModels/resnet50.pth')
+discriminator_p = Discriminator(n = num_known_classes).cuda()
+feature_extractor = ResNetFc(model_name='resnet50')
 #feature_extractor = AlexNetFc()
-cls = CLS(feature_extractor.output_num(), 11, bottle_neck_dim=256)
+cls = CLS(feature_extractor.output_num(), num_known_classes+1, bottle_neck_dim=256)
 net = nn.Sequential(feature_extractor, cls).cuda()
 
 scheduler = lambda step, initial_lr : inverseDecaySheduler(step, initial_lr, gamma=10, power=0.75, max_iter=10000)
@@ -76,7 +87,8 @@ while k <500:
 
         p0 = discriminator_p.forward(fs1)
         p1 = discriminator_p.forward(ft1)
-        p2 = torch.sum(p1, dim = -1)
+        #p2 = torch.sum(p1, dim = -1)
+        p2 = torch.max(p1, dim = -1)[0]
      
         # =========================rank the output of the multi-binary classifiers
         __,_,_,dptarget = discriminator_t.forward(ft1.detach())
@@ -92,7 +104,7 @@ while k <500:
 
         # =========================loss function
         ce = CrossEntropyLoss(label_source, predict_prob_source)
-        d1 = BCELossForMultiClassification(label_source[:,0:10],p0)
+        d1 = BCELossForMultiClassification(label_source[:,0:num_known_classes],p0)
         
         with OptimizerManager([optimizer_cls, optimizer_discriminator_p]):
             loss = ce + d1  
@@ -125,7 +137,8 @@ while k <400:
         
         p0 = discriminator_p.forward(fs1)
         p1 = discriminator_p.forward(ft1)
-        p2 = torch.sum(p1, dim = -1)
+        #p2 = torch.sum(p1, dim = -1)
+        p2 = torch.max(p1, dim = -1)[0]
      
         # =========================rank the output of the multi-binary classifiers
         __,_,_,dptarget = discriminator_t.forward(ft1.detach())
@@ -141,7 +154,7 @@ while k <400:
 
         # =========================loss function
         ce = CrossEntropyLoss(label_source, predict_prob_source)
-        d1 = BCELossForMultiClassification(label_source[:,0:10],p0)
+        d1 = BCELossForMultiClassification(label_source[:,0:num_known_classes],p0)
         d2 = CrossEntropyLoss(Variable(torch.from_numpy(np.concatenate((np.ones((2,1)), np.zeros((2,1))), axis = -1).astype('float32'))).cuda(),pred00)
         d2 += CrossEntropyLoss(Variable(torch.from_numpy(np.concatenate((np.zeros((2,1)), np.ones((2,1))), axis = -1).astype('float32'))).cuda(),pred01)
         
@@ -162,5 +175,5 @@ while k <400:
             clear_output()
 
 # =========================save the parameters of the known/unknown discriminator
-torch.save(discriminator_t.state_dict(), 'discriminator_a_office31.pkl')
+torch.save(discriminator_t.state_dict(), 'discriminator_a_office31'+source_ds+'_'+target_ds+'_'+num_exper+'.pkl')
 

@@ -18,6 +18,18 @@ class BaseFeatureExtractor(nn.Module):
 
 resnet_dict = {"resnet18":models.resnet18, "resnet34":models.resnet34, "resnet50":models.resnet50, "resnet101":models.resnet101, "resnet152":models.resnet152}
 
+class Conv_Block(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1):
+        super(Conv_Block, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride)
+        self.relu = torch.nn.LeakyReLU()
+        self.bn = nn.BatchNorm2d(out_channels)
+    
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.relu(x)
+        x = self.bn(x)
+        return x
 
 class Conv_Block_gn(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, groups, stride=1):
@@ -28,6 +40,19 @@ class Conv_Block_gn(nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
+        x = self.relu(x)
+        x = self.bn(x)
+        return x
+
+class Dense_Block(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(Dense_Block, self).__init__()
+        self.fc = nn.Linear(in_features, out_features)
+        self.relu = torch.nn.LeakyReLU()
+        self.bn = nn.BatchNorm1d(out_features)
+    
+    def forward(self, x):
+        x = self.fc(x)
         x = self.relu(x)
         x = self.bn(x)
         return x
@@ -60,30 +85,46 @@ class Generator_c2s(nn.Module):
         self.fc2 = Dense_Block_unnorm(100, 100)
 
     def forward(self, x):
-        print(x.size())
         x = self.conv1_1(x)
         x = self.conv1_2(x)
         x = self.conv1_3(x)
         x = self.pool1(x)
-        print(x.size())
         x = self.conv2_1(x)
         x = self.conv2_2(x)
         x = self.conv2_3(x)
         x = self.pool2(x)
-        print(x.size())
         x = x.view(x.size(0), -1)
-        print(x.size())
         x = self.drop1(x)
         x =  self.fc1(x)
         x = self.drop2(x)
         x =  self.fc2(x)
         return x
 
+class Generator_m2m(nn.Module):
+    def __init__(self):
+        super(Generator_m2m, self).__init__()
+        self.conv1 = Conv_Block(3, 20, kernel_size=5)
+        self.pool1 = nn.MaxPool2d(2, stride=2)
+        self.conv2 = Conv_Block(20, 50, kernel_size=5)
+        self.pool2 = nn.MaxPool2d(2, stride=2)
+        self.drop = nn.Dropout()
+        self.fc = Dense_Block(800, 500)
+        
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.pool1(x)
+        x = self.conv2(x)
+        x = self.pool2(x)
+        x = x.view(x.size(0), -1)
+        x = self.drop(x)
+        x = self.fc(x)
+        return x
+
 
 
 
 class CIFAR10Fc(BaseFeatureExtractor):
-    def __init__(self, normalize=True):
+    def __init__(self, normalize=False):
         super(CIFAR10Fc, self).__init__()
         self.model_cifar = Generator_c2s()
         if normalize:
@@ -110,6 +151,39 @@ class CIFAR10Fc(BaseFeatureExtractor):
         if self.normalize:
             x = (x - self.get_mean()) / self.get_std()
         x = self.model_cifar(x)
+        return x
+
+    def output_num(self):
+        return self.__in_features
+
+class MNISTFc(BaseFeatureExtractor):
+    def __init__(self, normalize=False):
+        super(MNISTFc, self).__init__()
+        self.model_mnist = Generator_m2m()
+        if normalize:
+            self.normalize=True
+            self.mean=False
+            self.std=False
+        else:
+            self.normalize=False
+        self.__in_features = 500
+
+    def get_mean(self):
+        if self.mean is False:
+            self.mean = Variable(
+                torch.from_numpy(np.asarray([0.485, 0.456, 0.406], dtype=np.float32).reshape((1, 3, 1, 1)))).cuda()
+        return self.mean
+
+    def get_std(self):
+        if self.std is False:
+            self.std = Variable(
+                torch.from_numpy(np.asarray([0.229, 0.224, 0.225], dtype=np.float32).reshape((1, 3, 1, 1)))).cuda()
+        return self.std
+
+    def forward(self, x):
+        if self.normalize:
+            x = (x - self.get_mean()) / self.get_std()
+        x = self.model_mnist(x)
         return x
 
     def output_num(self):
@@ -275,14 +349,27 @@ class LargeAdversarialNetwork(AdversarialNetwork):
             self.sigmoid
         )
 
+class SmallAdversarialNetwork(AdversarialNetwork):
+    def __init__(self, in_feature):
+        super(SmallAdversarialNetwork, self).__init__()
+        self.ad_layer1 = Dense_Block_unnorm(in_feature, 100)
+        self.ad_layer2 = nn.Linear(100, 1)
+        self.sigmoid = nn.Sigmoid()
+
+        self.main = nn.Sequential(
+            self.ad_layer1,
+            self.ad_layer2,
+            self.sigmoid
+        )
+
 class Discriminator(nn.Module):
     def __init__(self, n=10):
         super(Discriminator, self).__init__()
         self.n = n
         def f():
             return nn.Sequential(
-                nn.Linear(2048, 256),
-                #nn.Linear(4096, 256),
+                #nn.Linear(2048, 256),
+                nn.Linear(500, 256),
                 nn.BatchNorm1d(256),
                 nn.LeakyReLU(0.2, inplace=True),
                 nn.Linear(256, 1),

@@ -265,7 +265,19 @@ def CrossEntropyLoss(label, predict_prob, class_level_weight = None, instance_le
     ce = -label * torch.log(predict_prob + epsilon)
     return torch.sum(instance_level_weight * ce * class_level_weight) / float(N)
 
-def BCELossForMultiClassification(label, predict_prob, class_level_weight=None, instance_level_weight=None, epsilon = 1e-12):
+
+def SymmetricCrossEntropyLoss(label, predict_prob, alpha=0.1, beta=1.0, A_eps = 1e-4, epsilon = 1e-12):
+    N, C = label.size()
+    N_, C_ = predict_prob.size()
+    
+    assert N == N_ and C == C_, 'fatal error: dimension mismatch!'
+
+    ce = -label * torch.log(predict_prob + epsilon)
+    rce = -predict_prob * torch.log(label.clamp(min=A_eps))
+    return torch.sum( alpha*ce + beta*rce ) / float(N)
+
+
+def GeneralizedCrossEntropyLoss(label, predict_prob, q, class_level_weight = None, instance_level_weight = None, epsilon = 1e-12):
     N, C = label.size()
     N_, C_ = predict_prob.size()
     
@@ -285,8 +297,34 @@ def BCELossForMultiClassification(label, predict_prob, class_level_weight=None, 
             instance_level_weight = instance_level_weight.view(instance_level_weight.size(0), 1)
         assert instance_level_weight.size(0) == N, 'fatal error: dimension mismatch!'
 
+    ce = -label * (1.0 - predict_prob**q)/q
+    return torch.sum(instance_level_weight * ce * class_level_weight) / float(N)
+
+
+def BCELossForMultiClassification(label, predict_prob, class_level_weight=None, instance_level_weight=None, epsilon = 1e-12):
+    N, C = label.size()
+    N_, C_ = predict_prob.size()
+    normalization_const = float(N)
+    
+    assert N == N_ and C == C_, 'fatal error: dimension mismatch!'
+    
+    if class_level_weight is None:
+        class_level_weight = 1.0
+    else:
+        if len(class_level_weight.size()) == 1:
+            class_level_weight = class_level_weight.view(1, class_level_weight.size(0))
+        assert class_level_weight.size(1) == C, 'fatal error: dimension mismatch!'
+        
+    if instance_level_weight is None:
+        instance_level_weight = 1.0
+    else:
+        if len(instance_level_weight.size()) == 1:
+            instance_level_weight = instance_level_weight.view(instance_level_weight.size(0), 1)
+        normalization_const = torch.sum(instance_level_weight)
+        assert instance_level_weight.size(0) == N, 'fatal error: dimension mismatch!'
+
     bce = -label * torch.log(predict_prob + epsilon) - (1.0 - label) * torch.log(1.0 - predict_prob + epsilon)
-    return torch.sum(instance_level_weight * bce * class_level_weight) / float(N)
+    return torch.sum(instance_level_weight * bce * class_level_weight) / normalization_const
 	
 def EntropyLoss(predict_prob, class_level_weight=None, instance_level_weight=None, epsilon= 1e-20):
 
